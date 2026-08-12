@@ -138,20 +138,16 @@ const BulkImportModal = ({ isOpen, onClose, onImportComplete }) => {
 
           setProgress(90);
 
-          const resultData = await response.json();
+          const resultData = response;
 
-          if (response.ok) {
-            setResults({
-              success: resultData.successfulImports || 0,
-              failed:
-                (resultData.failedImports?.length || 0) + invalidRows.length,
-              errors: [...invalidRows, ...(resultData.failedImports || [])],
-            });
-            toast.success("Import process completed");
-            if (onImportComplete) onImportComplete();
-          } else {
-            throw new Error(resultData.error || "Failed to import students");
-          }
+          setResults({
+            success: resultData.successfulImports || 0,
+            failed:
+              (resultData.failedImports?.length || 0) + invalidRows.length,
+            errors: [...invalidRows, ...(resultData.failedImports || [])],
+          });
+          toast.success("Import process completed");
+          if (onImportComplete) onImportComplete();
         } catch (error) {
           console.error("Import error:", error);
           toast.error(error.message || "An error occurred during import");
@@ -211,7 +207,8 @@ const BulkImportModal = ({ isOpen, onClose, onImportComplete }) => {
                 <button
                   onClick={downloadTemplate}
                   className="mt-3 text-sm text-blue-400 hover:text-blue-300 flex items-center underline"
-                 aria-label="Action button">
+                  aria-label="Action button"
+                >
                   <Download className="w-4 h-4 mr-1" /> Download CSV Template
                 </button>
               </div>
@@ -359,13 +356,15 @@ const BulkImportModal = ({ isOpen, onClose, onImportComplete }) => {
               <button
                 onClick={resetModal}
                 className="px-4 py-2 rounded-lg text-gray-300 hover:text-white hover:bg-gray-800 transition-colors"
-               aria-label="Action button">
+                aria-label="Action button"
+              >
                 Import More
               </button>
               <button
                 onClick={onClose}
                 className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg transition-colors shadow-lg"
-               aria-label="Action button">
+                aria-label="Action button"
+              >
                 Done
               </button>
             </>

@@ -11,6 +11,8 @@ import { doc, getDoc, updateDoc } from "firebase/firestore";
 
 import { Button } from "@/components/ui/button";
 import * as faceapi from "face-api.js";
+import { useForm, FormProvider } from "react-hook-form";
+import FormField from "@/components/ui/FormField";
 
 import {
   User,
@@ -36,6 +38,8 @@ import {
   Bell,
   Eye,
   Smartphone,
+  TrendingUp,
+  TrendingDown,
 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
@@ -52,11 +56,9 @@ export default function UniversalProfile() {
 
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [isProfileDirty, setIsProfileDirty] = useState(false);
   const [activeTab, setActiveTab] = useState("overview");
   const isMounted = useIsMounted();
 
-  useUnsavedChangesWarning(isEditing && isProfileDirty);
 
   const [avatarUrl, setAvatarUrl] = useState(null);
   const [imageError, setImageError] = useState(false);
@@ -94,16 +96,23 @@ export default function UniversalProfile() {
 
   const [stats, setStats] = useState({});
 
-  const [formData, setFormData] = useState({
-    displayName: "",
-    email: "",
-    phone: "",
-    location: "",
-    bio: "Passionate learner exploring the world of knowledge through Learnova.",
-    website: "",
-    linkedin: "",
-    twitter: "",
+  const methods = useForm({
+    defaultValues: {
+      displayName: "",
+      email: "",
+      phone: "",
+      location: "",
+      bio: "Passionate learner exploring the world of knowledge through Learnova.",
+      website: "",
+      linkedin: "",
+      twitter: "",
+    }
   });
+
+  const { register, handleSubmit, reset, watch, formState: { errors, isDirty } } = methods;
+  const formData = watch();
+  const isProfileDirty = isDirty;
+  useUnsavedChangesWarning(isEditing && isProfileDirty);
 
   useEffect(() => {
     if (analytics) {
@@ -122,12 +131,17 @@ export default function UniversalProfile() {
   useEffect(() => {
     if (!user) return;
 
-    setFormData((prev) => ({
-      ...prev,
+    reset({
       displayName: user.displayName || "",
       email: user.email || "",
-    }));
-  }, [user]);
+      phone: "",
+      location: "",
+      bio: "Passionate learner exploring the world of knowledge through Learnova.",
+      website: "",
+      linkedin: "",
+      twitter: "",
+    });
+  }, [user, reset]);
 
   useEffect(() => {
     let active = true;
@@ -146,16 +160,16 @@ export default function UniversalProfile() {
           setUserData(data);
           setRole(data.role || "student");
 
-          setFormData((prev) => ({
-            ...prev,
-            displayName: data.displayName || prev.displayName,
+          reset({
+            displayName: data.displayName || user.displayName || "",
+            email: data.email || user.email || "",
             phone: data.phone || "",
             location: data.location || "",
-            bio: data.bio || prev.bio,
+            bio: data.bio || "Passionate learner exploring the world of knowledge through Learnova.",
             website: data.website || "",
             linkedin: data.linkedin || "",
             twitter: data.twitter || "",
-          }));
+          });
 
           setSettings({
             emailNotifications: data.settings?.emailNotifications ?? true,
@@ -182,15 +196,7 @@ export default function UniversalProfile() {
     return () => {
       active = false;
     };
-  }, [user]);
-
-  const handleInputChange = (e) => {
-    setIsProfileDirty(true);
-    setFormData((prev) => ({
-      ...prev,
-      [e.target.name]: e.target.value,
-    }));
-  };
+  }, [user, reset]);
 
   const handleToggleSetting = async (key) => {
     if (!user) return;
@@ -209,7 +215,7 @@ export default function UniversalProfile() {
     }
   };
 
-  const handleSave = async () => {
+  const onSave = async (data) => {
     if (!user) return;
 
     setIsSaving(true);
@@ -217,28 +223,28 @@ export default function UniversalProfile() {
     const loadingToast = toast.loading("Saving profile...");
 
     try {
-      if (formData.displayName && formData.displayName !== user.displayName) {
+      if (data.displayName && data.displayName !== user.displayName) {
         await updateProfile(user, {
-          displayName: formData.displayName,
+          displayName: data.displayName,
         });
       }
 
       const userRef = doc(db, "users", user.uid);
 
       await updateDoc(userRef, {
-        displayName: formData.displayName,
-        phone: formData.phone || "",
-        location: formData.location || "",
-        bio: formData.bio || "",
-        website: formData.website || "",
-        linkedin: formData.linkedin || "",
-        twitter: formData.twitter || "",
+        displayName: data.displayName,
+        phone: data.phone || "",
+        location: data.location || "",
+        bio: data.bio || "",
+        website: data.website || "",
+        linkedin: data.linkedin || "",
+        twitter: data.twitter || "",
       });
 
       if (isMounted()) {
         setUserData((prev) => ({
           ...prev,
-          ...formData,
+          ...data,
         }));
 
         toast.success("Profile saved successfully!", {
@@ -246,7 +252,7 @@ export default function UniversalProfile() {
         });
 
         setIsEditing(false);
-        setIsProfileDirty(false);
+        reset(data);
       }
     } catch (error) {
       toast.error(error.message || "Failed to save profile.", {
@@ -349,18 +355,12 @@ export default function UniversalProfile() {
         uploadFormData.append("faceDescriptor", faceDescriptorString);
       }
 
-      const res = await apiFetch("/api/images", {
+      const data = await apiFetch("/api/images", {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
         body: uploadFormData,
       });
 
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}));
-        throw new Error(errorData.error || "Failed to upload image");
-      }
-
-      const data = await res.json();
       if (data.success && data.url) {
         await updateProfile(user, { photoURL: data.url });
         const userRef = doc(db, "users", user.uid);
@@ -570,7 +570,8 @@ export default function UniversalProfile() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-gray-900 to-slate-950 text-white">
+    <FormProvider {...methods}>
+      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-gray-900 to-slate-950 text-white">
       <Navbar />
 
       <div className="relative max-w-7xl mx-auto px-4 py-8">
@@ -601,7 +602,8 @@ export default function UniversalProfile() {
                   type="button"
                   onClick={handleImageUpload}
                   className="absolute bottom-0 right-0 bg-blue-500 hover:bg-blue-600 rounded-full p-2"
-                  title="Change photo" aria-label="Change photo"
+                  title="Change photo"
+                  aria-label="Change photo"
                 >
                   <Camera className="w-4 h-4" />
                 </button>
@@ -621,14 +623,16 @@ export default function UniversalProfile() {
                     type="button"
                     onClick={handleConfirmUpload}
                     className="text-xs bg-green-600 hover:bg-green-700 px-3 py-1 rounded-full"
-                   aria-label="Action button">
+                    aria-label="Action button"
+                  >
                     Save Photo
                   </button>
                   <button
                     type="button"
                     onClick={handleCancelPreview}
                     className="text-xs bg-gray-600 hover:bg-gray-700 px-3 py-1 rounded-full"
-                   aria-label="Action button">
+                    aria-label="Action button"
+                  >
                     Cancel
                   </button>
                 </div>
@@ -640,7 +644,8 @@ export default function UniversalProfile() {
                   type="button"
                   onClick={handleRemovePhoto}
                   className="text-xs text-red-400 hover:text-red-300 underline"
-                 aria-label="Action button">
+                  aria-label="Action button"
+                >
                   Remove photo
                 </button>
               )}
@@ -651,12 +656,12 @@ export default function UniversalProfile() {
               <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
                 <div>
                   {isEditing ? (
-                    <input
-                      name="displayName"
-                      value={formData.displayName}
-                      onChange={handleInputChange}
-                      className="bg-transparent border-b border-white/20 text-3xl font-bold outline-none"
-                    />
+                    <FormField name="displayName">
+                      <input
+                        className="bg-transparent border-b border-white/20 text-3xl font-bold outline-none"
+                        {...register("displayName", { required: "Display name is required" })}
+                      />
+                    </FormField>
                   ) : (
                     <h1 className="text-3xl font-bold flex items-center">
                       {getUserDisplayName()}
@@ -673,13 +678,13 @@ export default function UniversalProfile() {
                 </div>
 
                 <div>
-                  {isEditing ? (
-                    <div className="flex gap-3">
-                      <Button
-                        onClick={handleSave}
-                        disabled={isSaving}
-                        className="bg-green-600 hover:bg-green-700"
-                      >
+                    {isEditing ? (
+                      <div className="flex gap-3">
+                        <Button
+                          onClick={handleSubmit(onSave)}
+                          disabled={isSaving}
+                          className="bg-green-600 hover:bg-green-700"
+                        >
                         <Save className="w-4 h-4 mr-2" />
 
                         {isSaving ? "Saving..." : "Save"}
@@ -689,7 +694,7 @@ export default function UniversalProfile() {
                         variant="outline"
                         onClick={() => {
                           setIsEditing(false);
-                          setIsProfileDirty(false);
+                          reset();
                         }}
                       >
                         <X className="w-4 h-4 mr-2" />
@@ -711,13 +716,13 @@ export default function UniversalProfile() {
               {/* Bio */}
               <div className="mt-6">
                 {isEditing ? (
-                  <textarea
-                    name="bio"
-                    value={formData.bio}
-                    onChange={handleInputChange}
-                    rows={4}
-                    className="w-full bg-white/5 border border-white/20 rounded-xl p-4 outline-none"
-                  />
+                  <FormField name="bio">
+                    <textarea
+                      rows={4}
+                      className="w-full bg-white/5 border border-white/20 rounded-xl p-4 outline-none"
+                      {...register("bio")}
+                    />
+                  </FormField>
                 ) : (
                   <p className="text-white/70">{formData.bio}</p>
                 )}
@@ -793,14 +798,30 @@ export default function UniversalProfile() {
               label: "Awards",
               icon: Award,
             },
+            {
+              id: "merits",
+              label: "Merit Points",
+              icon: TrendingUp,
+              color: "text-green-400"
+            },
+            {
+              id: "demerits",
+              label: "Demerit Points",
+              icon: TrendingDown,
+              color: "text-red-400"
+            },
           ].map((stat) => (
             <div
               key={stat.id}
               className="bg-black/20 border border-white/10 rounded-2xl p-6"
             >
-              <stat.icon className="w-8 h-8 text-blue-400 mb-4" />
+              <stat.icon className={`w-8 h-8 mb-4 ${stat.color || 'text-blue-400'}`} />
 
-              <h3 className="text-3xl font-bold">{stats?.[stat.id] || "0"}</h3>
+              <h3 className="text-3xl font-bold">{
+                stat.id === "merits" ? userData?.meritPoints || 0 :
+                stat.id === "demerits" ? userData?.demeritPoints || 0 :
+                stats?.[stat.id] || "0"
+              }</h3>
 
               <p className="text-white/60 mt-1">{stat.label}</p>
             </div>
@@ -978,5 +999,6 @@ export default function UniversalProfile() {
         </div>
       </div>
     </div>
+      </FormProvider>
   );
 }

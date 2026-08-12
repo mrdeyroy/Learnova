@@ -11,6 +11,34 @@ import { logger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
 
+export const GET = withErrorHandler(async (request) => {
+  const decodedToken = await requireAuth(request);
+
+  let db;
+  try {
+    db = await connectDb();
+  } catch (error) {
+    throw new AppError(
+      "Database connection timed out or failed. Please try again.",
+      503
+    );
+  }
+
+  const userSettings = await db
+    .collection("settings")
+    .findOne({ userId: decodedToken.uid });
+
+  if (!userSettings) {
+    return success({ message: "No settings found", data: {} });
+  }
+
+  // Strip internal MongoDB fields before returning
+  const { _id, userId, updatedAt, ...safeSettings } = userSettings;
+
+  return success({ message: "Settings fetched successfully", ...safeSettings });
+});
+
+
 const settingsSchema = z
   .object({
     userId: z.string().optional(),
@@ -61,6 +89,14 @@ const settingsSchema = z
       .object({
         lowAttendanceThreshold: z.number().min(0).max(100).optional(),
         enableAttendanceAutomation: z.boolean().optional(),
+        engagementWeights: z
+          .object({
+            attendance: z.number().min(0).max(1).optional(),
+            activity: z.number().min(0).max(1).optional(),
+            assignment: z.number().min(0).max(1).optional(),
+            academic: z.number().min(0).max(1).optional(),
+          })
+          .optional(),
       })
       .strict()
       .optional(),

@@ -2,9 +2,14 @@ import { z } from "zod";
 import { connectDb } from "@/lib/mongodb";
 import { requireAuth } from "@/lib/rbac";
 import { withErrorHandler, parseJSON } from "@/lib/error-handler";
-import { checkRateLimit } from "@/lib/rateLimit";
+import {
+  checkRateLimit,
+  extractClientIp,
+  RATE_LIMIT_IP_FALLBACK,
+} from "@/lib/rateLimit";
 import { jsonSuccess, jsonError } from "@/lib/api-response";
 import { ValidationError } from "@/lib/errors";
+import { enforceContentPolicy } from "@/lib/ai/contentFilter";
 
 export const dynamic = "force-dynamic";
 
@@ -31,8 +36,10 @@ export const GET = withErrorHandler(async (request) => {
   const decodedToken = await requireAuth(request);
   const userId = decodedToken.uid;
 
-  const ip = request.headers.get("x-forwarded-for") || "127.0.0.1";
-  const rateLimitResult = await checkRateLimit(`conversations_get_${ip}_${userId}`);
+  const ip = extractClientIp(request) || RATE_LIMIT_IP_FALLBACK;
+  const rateLimitResult = await checkRateLimit(
+    `conversations_get_${ip}_${userId}`
+  );
   if (!rateLimitResult.allowed) {
     return jsonError("Too many requests. Please try again later.", 429);
   }
@@ -66,8 +73,10 @@ export const POST = withErrorHandler(async (request) => {
   const decodedToken = await requireAuth(request);
   const userId = decodedToken.uid;
 
-  const ip = request.headers.get("x-forwarded-for") || "127.0.0.1";
-  const rateLimitResult = await checkRateLimit(`conversations_post_${ip}_${userId}`);
+  const ip = extractClientIp(request) || RATE_LIMIT_IP_FALLBACK;
+  const rateLimitResult = await checkRateLimit(
+    `conversations_post_${ip}_${userId}`
+  );
   if (!rateLimitResult.allowed) {
     return jsonError("Too many requests. Please try again later.", 429);
   }
@@ -81,6 +90,13 @@ export const POST = withErrorHandler(async (request) => {
   }
 
   const { userMessage, botMessage } = parsed.data;
+
+  // AI Content Filter: Check if user message is toxic before saving
+  try {
+    await enforceContentPolicy(userMessage);
+  } catch (error) {
+    return jsonError(error.message, 400);
+  }
 
   const db = await connectDb();
   const conversation = {

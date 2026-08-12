@@ -7,10 +7,10 @@ export const POST = withErrorHandler(async (req, { params }) => {
   const { sessionId } = await params;
 
   if (!sessionId) {
-    return new Response(
-      JSON.stringify({ error: "Session ID is required" }),
-      { status: 400, headers: { "Content-Type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ error: "Session ID is required" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   const db = await connectDb();
@@ -25,14 +25,24 @@ export const POST = withErrorHandler(async (req, { params }) => {
     });
   }
 
-  if (session.userId !== payload.uid) {
+  const sessionUserId = session.userId || session.firebaseUid;
+  if (sessionUserId !== payload.uid) {
     return new Response(JSON.stringify({ error: "Forbidden" }), {
       status: 403,
       headers: { "Content-Type": "application/json" },
     });
   }
 
-  await db.collection("quiz_sessions").deleteOne({ _id: sessionId });
+  if (session.completed === true) {
+    return new Response(
+      JSON.stringify({ error: "Cannot abandon a submitted quiz" }),
+      { status: 409, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  await db
+    .collection("quiz_sessions")
+    .deleteOne({ _id: sessionId, completed: { $ne: true } });
 
   return new Response(
     JSON.stringify({ success: true, message: "Session abandoned" }),

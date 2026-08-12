@@ -1,24 +1,26 @@
 import { NextResponse } from "next/server";
-import { getAdminDb } from "@/lib/firebase-admin";
-import { requireRole } from "@/lib/rbac";
+import { getAdminDb, getUserProfile } from "@/lib/firebase-admin";
+import { requireAuth } from "@/lib/rbac";
 import { withErrorHandler } from "@/lib/error-handler";
-import { checkRateLimit } from "@/lib/rateLimit";
+import {
+  checkRateLimit,
+  extractClientIp,
+  RATE_LIMIT_IP_FALLBACK,
+} from "@/lib/rateLimit";
 import { AppError } from "@/lib/errors";
 import { connectDb } from "@/lib/mongodb";
 import { publishNoticeToRedis } from "@/app/api/notices/stream/route";
 import { createNoticeSchema, withValidation } from "@/lib/validations";
+import { emitWebhookEvent } from "@/lib/webhook/dispatcher";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 async function publishNotice(request, validData) {
-  const allowedRoles = ["teacher", "admin", "staff"];
-  const { payload: decodedToken, profile } = await requireRole(
-    request,
-    allowedRoles
-  );
+  const decodedToken = await requireAuth(request);
+  const profile = await getUserProfile(decodedToken.uid);
 
-  const ip = request.headers.get("x-forwarded-for") || "127.0.0.1";
+  const ip = extractClientIp(request) || RATE_LIMIT_IP_FALLBACK;
   const rateLimitResult = await checkRateLimit(
     `publish_notice_${ip}_${decodedToken.uid}`
   );
@@ -52,12 +54,24 @@ async function publishNotice(request, validData) {
     console.error("Failed to sync notice to MongoDB:", mongoError);
   }
 
-  // Publish to Redis for SSE real-time stream
+  // Publish to Redis for real-time SSE delivery
   try {
-    await publishNoticeToRedis({ ...newNotice, _id: result.id });
+    await publishNoticeToRedis({
+      ...newNotice,
+      _id: result.id,
+    });
   } catch (redisError) {
     console.error("Failed to publish notice to Redis:", redisError);
   }
+
+  emitWebhookEvent("notice.created", {
+    noticeId: result.id,
+    title: newNotice.title,
+    author: newNotice.author,
+    authorId: newNotice.authorId,
+    targetAudience: newNotice.targetAudience,
+    instituteId: newNotice.instituteId,
+  });
 
   return NextResponse.json({
     success: true,

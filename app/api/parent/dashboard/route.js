@@ -3,6 +3,7 @@ import { withErrorHandler } from "@/lib/error-handler";
 import { requireParent } from "@/lib/rbac";
 import { initFirebaseAdmin } from "@/lib/firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
+import { predictStudentAttendance } from "@/lib/attendanceUtils";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -38,7 +39,11 @@ export const GET = withErrorHandler(async (request) => {
     // Fetch student overall stats (like attendance rate)
     const statsDoc = await db.collection("userStats").doc(studentId).get();
     const stats = statsDoc.exists ? statsDoc.data() : {};
-    const attendanceRateStr = stats["Attendance Rate"] || "0%";
+    const rawAttendance = stats["Attendance Rate"];
+    const attendanceRateStr =
+      rawAttendance === undefined || rawAttendance === null
+        ? "0%"
+        : String(rawAttendance);
     const attendanceRate =
       parseInt(attendanceRateStr.replace("%", ""), 10) || 0;
 
@@ -48,7 +53,11 @@ export const GET = withErrorHandler(async (request) => {
       const noticesQuery = await db
         .collection("notices")
         .where("instituteId", "==", instituteId)
-        .where("targetAudience", "array-contains-any", ["student", "parent"])
+        .where("targetAudience", "array-contains-any", [
+          "student",
+          "parent",
+          "all",
+        ])
         .orderBy("createdAt", "desc")
         .limit(3)
         .get();
@@ -74,27 +83,70 @@ export const GET = withErrorHandler(async (request) => {
           )
         : "N/A";
 
-    // Self-healing check: Trigger low-attendance notification if rate is below 75%
+    // Self-healing check: Trigger low-attendance notification if rate is below 75%.
+    // Uses a deterministic per-day doc id + Firestore .create() so concurrent
+    // GETs (parent refreshes twice, opens in two tabs, React Query retry) race
+    // safely — the second write fails with ALREADY_EXISTS instead of producing
+    // a duplicate alert row.
     if (attendanceRate < 75) {
-      // Check if alert already exists within the last 24 hours
+      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      const alertId = `low_attendance_${studentId}_${parentId}_${today}`;
+      try {
+        await db
+          .collection("notifications")
+          .doc(alertId)
+          .create({
+            recipientId: parentId,
+            studentId,
+            message: `Alert: ${studentName}'s attendance has dropped to ${attendanceRateStr}, which is below the 75% required threshold.`,
+            type: "low_attendance",
+            createdAt: new Date().toISOString(),
+            read: false,
+          });
+      } catch (err) {
+        // ALREADY_EXISTS is the intended path when the same day's alert is
+        // already recorded — anything else is a real failure worth logging.
+        if (err?.code !== 6 && err?.code !== "already-exists") {
+          console.error("Failed to write low_attendance alert:", err);
+        }
+      }
+    }
+
+    // Early warning check: Trigger warning if projected attendance is below 75%
+    const recordsQuery = await db
+      .collection("attendance_records")
+      .where("userId", "==", studentId)
+      .get();
+    
+    const studentRecords = [];
+    recordsQuery.docs.forEach((doc) => {
+      const data = doc.data();
+      studentRecords.push({
+        date: data.date,
+        status: data.status || "present",
+      });
+    });
+
+    const prediction = predictStudentAttendance(studentRecords);
+    if (prediction.riskLevel === "high") {
       const oneDayAgo = new Date(
         Date.now() - 24 * 60 * 60 * 1000
       ).toISOString();
-      const existingAlerts = await db
+      const existingWarningAlerts = await db
         .collection("notifications")
         .where("recipientId", "==", parentId)
         .where("studentId", "==", studentId)
-        .where("type", "==", "low_attendance")
+        .where("type", "==", "attendance_warning")
         .where("createdAt", ">=", oneDayAgo)
         .limit(1)
         .get();
 
-      if (existingAlerts.empty) {
+      if (existingWarningAlerts.empty) {
         await db.collection("notifications").add({
           recipientId: parentId,
           studentId,
-          message: `Alert: ${studentName}'s attendance has dropped to ${attendanceRateStr}, which is below the 75% required threshold.`,
-          type: "low_attendance",
+          message: `Early Warning: ${studentName}'s attendance is projected to drop to ${prediction.projectedPercentage}%, which is below the 75% required threshold.`,
+          type: "attendance_warning",
           createdAt: new Date().toISOString(),
           read: false,
         });

@@ -10,6 +10,8 @@ vi.mock("@/lib/rbac", () => ({
 
 vi.mock("@/lib/rateLimit", () => ({
   checkRateLimit: vi.fn().mockResolvedValue({ allowed: true, remaining: 9 }),
+  extractClientIp: vi.fn(() => "203.0.113.10"),
+  RATE_LIMIT_IP_FALLBACK: "rate-limit-no-ip",
 }));
 
 vi.mock("@/lib/error-handler", () => ({
@@ -147,7 +149,11 @@ describe("GET /api/conversations - Pagination", () => {
   });
 
   test("returns conversations for authenticated user", async () => {
-    const req = createMockRequest({}, null, "http://localhost/api/conversations");
+    const req = createMockRequest(
+      {},
+      null,
+      "http://localhost/api/conversations"
+    );
     const response = await GET(req);
 
     expect(response.status).toBe(200);
@@ -174,7 +180,11 @@ describe("GET /api/conversations - Pagination", () => {
   test("rejects when rate limited", async () => {
     checkRateLimit.mockResolvedValue({ allowed: false, remaining: 0 });
 
-    const req = createMockRequest({}, null, "http://localhost/api/conversations");
+    const req = createMockRequest(
+      {},
+      null,
+      "http://localhost/api/conversations"
+    );
     const response = await GET(req);
 
     expect(response.status).toBe(429);

@@ -27,7 +27,10 @@ export default function DailyReflectionJournal() {
     }
   }, []);
 
-  const handleSave = () => {
+  const [sentimentAnalysis, setSentimentAnalysis] = useState(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  const handleSave = async () => {
     if (typeof window !== "undefined") {
       window.localStorage.setItem(
         "learnova-wellness-reflections",
@@ -38,7 +41,29 @@ export default function DailyReflectionJournal() {
         })
       );
       setSaved(true);
-      timeoutRef.current = window.setTimeout(() => setSaved(false), 2200);
+      if (timeoutRef.current) {
+        window.clearTimeout(timeoutRef.current);
+      }
+      timeoutRef.current = window.setTimeout(() => setSaved(false), 3000);
+
+      // Trigger Sentiment Analysis
+      setIsAnalyzing(true);
+      setSentimentAnalysis(null);
+      try {
+        const response = await fetch('/api/wellness/sentiment', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: `${wentWell} ${proudOf}` })
+        });
+        const data = await response.json();
+        if (data.success) {
+          setSentimentAnalysis(data.analysis);
+        }
+      } catch (error) {
+        console.error("Failed to analyze sentiment", error);
+      } finally {
+        setIsAnalyzing(false);
+      }
     }
   };
 
@@ -112,8 +137,8 @@ export default function DailyReflectionJournal() {
             <button
               type="button"
               onClick={handleSave}
-              className="inline-flex items-center justify-center gap-2 rounded-3xl bg-gradient-to-r from-violet-500 to-fuchsia-500 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:scale-[1.01] focus:outline-none focus:ring-2 focus:ring-violet-400/40"
-             aria-label="Action button">
+              className="inline-flex w-full items-center justify-center gap-2 rounded-3xl bg-gradient-to-r from-violet-500 to-fuchsia-500 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 transition-all hover:-translate-y-0.5 hover:shadow-violet-500/40 focus:outline-none focus:ring-2 focus:ring-violet-400/40 focus:ring-offset-2 focus:ring-offset-slate-950 sm:w-auto"
+            >
               <Feather className="h-4 w-4" /> Save reflection
             </button>
             <p className="text-sm text-slate-400">
@@ -121,15 +146,42 @@ export default function DailyReflectionJournal() {
             </p>
           </div>
 
-          {saved && (
+          {saved && !isAnalyzing && !sentimentAnalysis && (
             <motion.div
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 10 }}
               className="mt-4 inline-flex items-center gap-2 rounded-3xl border border-violet-500/30 bg-violet-500/10 px-4 py-3 text-sm text-violet-100"
             >
-              <CheckCircle2 className="h-4 w-4" /> Reflection saved
-              successfully.
+              <CheckCircle2 className="h-4 w-4" /> Reflection saved successfully.
+            </motion.div>
+          )}
+
+          {isAnalyzing && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="mt-4 flex items-center gap-2 text-sm text-violet-300"
+            >
+              <Sparkles className="h-4 w-4 animate-spin" /> AI is analyzing your reflection...
+            </motion.div>
+          )}
+
+          {sentimentAnalysis && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className={`mt-6 rounded-3xl border p-4 ${
+                sentimentAnalysis.sentiment === 'Stressed' || sentimentAnalysis.sentiment === 'Burned Out'
+                  ? 'border-red-500/30 bg-red-500/10 text-red-100'
+                  : 'border-green-500/30 bg-green-500/10 text-green-100'
+              }`}
+            >
+              <div className="flex items-center gap-2 font-semibold mb-1">
+                <Sparkles className="h-4 w-4" />
+                Wellness Insights ({sentimentAnalysis.sentiment})
+              </div>
+              <p className="text-sm opacity-90">{sentimentAnalysis.message}</p>
             </motion.div>
           )}
         </div>

@@ -37,7 +37,7 @@ import { apiFetch } from "@/lib/apiClient";
 import { TaskSection } from "@/components/productivity/TaskSection";
 import { CalendarSection } from "@/components/productivity/CalendarSection";
 import { AgendaListSection } from "@/components/productivity/AgendaListSection";
-
+import { safeLocalStorageSet, safeLocalStorageGet } from "@/lib/storage";
 const MODES = {
   focus: { label: "Focus", seconds: 25 * 60, accent: "text-cyan-300" },
   short: { label: "Short Break", seconds: 5 * 60, accent: "text-emerald-300" },
@@ -249,7 +249,8 @@ const AcademicEligibilityCard = ({ isDark }) => {
         <button
           onClick={handleCheck}
           className="w-full rounded-xl bg-cyan-500 hover:bg-cyan-400 transition-colors px-3 py-1.5 text-sm font-semibold text-slate-900"
-         aria-label="Action button">
+          aria-label="Action button"
+        >
           Check Eligibility
         </button>
 
@@ -259,7 +260,7 @@ const AcademicEligibilityCard = ({ isDark }) => {
   );
 };
 export default function ProductivityPage() {
-  const { user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const [dataLoaded, setDataLoaded] = useState(false);
 
   const [mode, setMode] = useState("focus");
@@ -306,12 +307,8 @@ export default function ProductivityPage() {
   /** Syncs current tasks and agenda to the API. Writes to localStorage first for instant persistence. */
   const syncToApi = useCallback(
     async (currentTasks, currentAgenda) => {
-      try {
-        localStorage.setItem(TASKS_KEY, JSON.stringify(currentTasks));
-        localStorage.setItem(AGENDA_KEY, JSON.stringify(currentAgenda));
-      } catch (_) {
-        // localStorage may be full or unavailable
-      }
+      safeLocalStorageSet(TASKS_KEY, currentTasks);
+      safeLocalStorageSet(AGENDA_KEY, currentAgenda);
 
       if (!user || isSyncingRef.current) return;
       isSyncingRef.current = true;
@@ -348,14 +345,10 @@ export default function ProductivityPage() {
   useEffect(() => {
     async function loadData() {
       if (!user) {
-        try {
-          const savedTasks = localStorage.getItem(TASKS_KEY);
-          const savedAgenda = localStorage.getItem(AGENDA_KEY);
-          if (savedTasks) setTasks(JSON.parse(savedTasks));
-          if (savedAgenda) setAgendaItems(JSON.parse(savedAgenda));
-        } catch (_) {
-          // Corrupted localStorage — use empty defaults
-        }
+        const savedTasks = safeLocalStorageGet(TASKS_KEY);
+        const savedAgenda = safeLocalStorageGet(AGENDA_KEY);
+        if (savedTasks) setTasks(savedTasks);
+        if (savedAgenda) setAgendaItems(savedAgenda);
         setDataLoaded(true);
         return;
       }
@@ -370,15 +363,10 @@ export default function ProductivityPage() {
         if (data.agendaItems && Object.keys(data.agendaItems).length > 0) {
           setAgendaItems(data.agendaItems);
         }
-      } catch (_) {
-        try {
-          const savedTasks = localStorage.getItem(TASKS_KEY);
-          const savedAgenda = localStorage.getItem(AGENDA_KEY);
-          if (savedTasks) setTasks(JSON.parse(savedTasks));
-          if (savedAgenda) setAgendaItems(JSON.parse(savedAgenda));
-        } catch (__) {
-          // Corrupted localStorage — use empty defaults
-        }
+        const savedTasks = safeLocalStorageGet(TASKS_KEY);
+        const savedAgenda = safeLocalStorageGet(AGENDA_KEY);
+        if (savedTasks) setTasks(savedTasks);
+        if (savedAgenda) setAgendaItems(savedAgenda);
       } finally {
         setDataLoaded(true);
       }
@@ -887,6 +875,16 @@ export default function ProductivityPage() {
   if (!mounted) {
     return null;
   }
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="w-10 h-10 border-4 border-purple-500/30 border-t-purple-500 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  return (   ← this is the existing line 879, stays as-is
 
   return (
     <div

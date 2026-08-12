@@ -1,0 +1,101 @@
+import { NextResponse } from "next/server";
+import { connectDb } from "@/lib/mongodb";
+import { logger } from "@/lib/logger";
+import { sendAbsenceAlert } from "@/lib/services/notificationService";
+import { authorizeCronRequest } from "@/lib/cronAuth";
+
+// Note: Secured by CRON_SECRET token authorization
+export async function POST(request) {
+  try {
+    const cronAuth = authorizeCronRequest(request);
+    if (!cronAuth.authorized) {
+      return cronAuth.response;
+    }
+
+    const db = await connectDb();
+
+    // 1. Get attendance records for the last 14 days to compute recent streaks
+    const fourteenDaysAgo = new Date();
+    fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14);
+
+    const pipeline = [
+      {
+        $match: {
+          date: { $gte: fourteenDaysAgo.toISOString().slice(0, 10) },
+        },
+      },
+      {
+        $group: {
+          _id: "$userId",
+          studentName: { $last: "$studentName" },
+          email: { $last: "$email" },
+          statuses: {
+            $push: {
+              date: "$date",
+              status: "$status",
+            },
+          },
+        },
+      },
+    ];
+
+    const results = await db
+      .collection("attendance")
+      .aggregate(pipeline)
+      .toArray();
+
+    let alertsSent = 0;
+
+    for (const student of results) {
+      // Sort statuses descending by date (most recent first)
+      const sorted = student.statuses.sort((a, b) =>
+        b.date.localeCompare(a.date)
+      );
+
+      let consecutiveAbsences = 0;
+      for (const record of sorted) {
+        if (record.status === "absent") {
+          consecutiveAbsences++;
+        } else {
+          // Break on the first non-absent record
+          break;
+        }
+      }
+
+      // If threshold is met (e.g., >= 3 consecutive absences)
+      if (consecutiveAbsences >= 3) {
+        const userProfile = await db.collection("users").findOne({
+          $or: [
+            { firebaseUid: student._id },
+            { userId: student._id },
+            { _id: student._id },
+          ],
+        });
+
+        const sent = await sendAbsenceAlert(
+          {
+            userId: student._id,
+            studentName: student.studentName || userProfile?.displayName || userProfile?.name || "Student",
+            email: student.email,
+            guardianEmail: userProfile?.guardianEmail || userProfile?.parentEmail || null,
+            guardianPhone: userProfile?.guardianPhone || userProfile?.parentPhone || null,
+          },
+          consecutiveAbsences
+        );
+
+        if (sent) alertsSent++;
+      }
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: `Checked ${results.length} students. Sent ${alertsSent} alerts.`,
+    });
+  } catch (error) {
+    logger.error(`Error in absence-alerts cron: ${error.message}`);
+    return NextResponse.json(
+      { error: "Internal Server Error" },
+      { status: 500 }
+    );
+  }
+}

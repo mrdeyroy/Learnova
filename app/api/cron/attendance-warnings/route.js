@@ -1,45 +1,19 @@
 import { NextResponse } from "next/server";
+import admin from "firebase-admin";
 import { authorizeCronRequest } from "@/lib/cronAuth";
 import { connectDb } from "@/lib/mongodb";
+import { initializeFirebase } from "@/lib/firebase-admin";
 import { evaluateStudentAttendance } from "@/lib/attendanceUtils";
+import { enqueue, JOB_TYPES } from "@/lib/queue";
+import { logger } from "@/lib/logger";
+import { publishEvent } from "@/lib/ssePublisher";
+import { emitWebhookEvent } from "@/lib/webhook/dispatcher";
+import { sendLowAttendanceWarning } from "@/services/emailService";
 
 export const dynamic = "force-dynamic";
 
 const STUDENT_BATCH_SIZE = 50;
 const FLUSH_THRESHOLD = 500;
-
-function getStudentUid(student) {
-  return student?.uid || student?.firebaseUid;
-}
-
-function buildWarningPayload({ uid, email, name, evaluation, threshold, now }) {
-  const notification = {
-    userId: uid,
-    title: "Low Attendance Warning",
-    message: `Your current attendance is ${evaluation.percentage}%, which is below the required ${threshold}%. Please improve your attendance.`,
-    type: "warning",
-    read: false,
-    createdAt: now,
-  };
-
-  const warningLog = {
-    userId: uid,
-    percentage: evaluation.percentage,
-    threshold,
-    createdAt: now,
-  };
-
-  const emailData = email
-    ? {
-        to_email: email,
-        to_name: name || "Student",
-        attendance_percentage: evaluation.percentage,
-        threshold,
-      }
-    : null;
-
-  return { notification, warningLog, emailData };
-}
 
 async function getRecentWarningUserIds(db, userIds, cooldownDate) {
   if (userIds.length === 0) {
@@ -84,41 +58,18 @@ async function getRecentWarningUserIds(db, userIds, cooldownDate) {
   return new Set(checks.filter(Boolean));
 }
 
-
 async function sendWarningEmails(emailsToSend) {
-  const hasEmailConfig =
-    process.env.EMAILJS_SERVICE_ID &&
-    process.env.EMAILJS_TEMPLATE_ID &&
-    process.env.EMAILJS_PUBLIC_KEY;
+  const dashboardUrl =
+    process.env.NEXT_PUBLIC_APP_URL || "https://learnova.app";
 
-  if (!hasEmailConfig || emailsToSend.length === 0) {
-    return;
-  }
-
-  const sendEmail = async (emailData) => {
-    try {
-      await fetch("https://api.emailjs.com/api/v1.0/email/send", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          service_id: process.env.EMAILJS_SERVICE_ID,
-          template_id: process.env.EMAILJS_TEMPLATE_ID,
-          user_id: process.env.EMAILJS_PUBLIC_KEY,
-          template_params: emailData,
-        }),
-      });
-    } catch (error) {
-      console.error(`Failed to send email to ${emailData.to_email}:`, error);
-    }
-  };
-
-  // Process emails in parallel chunks to prevent serverless function timeouts
-  const CHUNK_SIZE = 50;
-  for (let i = 0; i < emailsToSend.length; i += CHUNK_SIZE) {
-    const chunk = emailsToSend.slice(i, i + CHUNK_SIZE);
-    await Promise.allSettled(chunk.map(sendEmail));
+  for (const emailData of emailsToSend) {
+    sendLowAttendanceWarning({
+      email: emailData.to_email,
+      name: emailData.to_name,
+      attendancePercentage: emailData.attendance_percentage,
+      threshold: emailData.threshold,
+      dashboardUrl,
+    });
   }
 }
 
@@ -136,10 +87,9 @@ export async function GET(request) {
     // Ensure the warning_logs collection has a compound index on (userId, createdAt)
     // so the cooldown query does not trigger a full collection scan
     try {
-      await db.collection("warning_logs").createIndex(
-        { userId: 1, createdAt: -1 },
-        { background: true }
-      );
+      await db
+        .collection("warning_logs")
+        .createIndex({ userId: 1, createdAt: -1 }, { background: true });
     } catch {
       // Index may already exist
     }
@@ -170,6 +120,18 @@ export async function GET(request) {
       if (notificationsToInsert.length === 0) return;
       await db.collection("notifications").insertMany(notificationsToInsert);
       await db.collection("warning_logs").insertMany(warningLogsToInsert);
+      for (const notif of notificationsToInsert) {
+        publishEvent("notifications", "warning", {
+          _id: notif._id?.toString?.() || notif._id,
+          recipientId: notif.userId,
+          title: notif.title,
+          message: notif.message,
+          type: notif.type,
+          read: false,
+          createdAt:
+            notif.createdAt?.toISOString?.() || new Date().toISOString(),
+        }).catch(() => {});
+      }
       notificationsToInsert = [];
       warningLogsToInsert = [];
     }
@@ -224,65 +186,72 @@ export async function GET(request) {
       const instituteStudents = studentsByInstitute.get(instituteId) || [];
       if (instituteStudents.length === 0) continue;
 
-      const instituteStudentUids = instituteStudents
-        .map((s) => s.uid || s.firebaseUid)
-        .filter(Boolean);
+      // Process students in batches to keep memory usage bounded
+      for (let i = 0; i < instituteStudents.length; i += STUDENT_BATCH_SIZE) {
+        const batch = instituteStudents.slice(i, i + STUDENT_BATCH_SIZE);
+        const batchUids = batch
+          .map((s) => s.uid || s.firebaseUid)
+          .filter(Boolean);
+        if (batchUids.length === 0) continue;
 
-      const attendanceRecords = await db
-        .collection("attendance")
-        .find({ userId: { $in: instituteStudentUids }, instituteId })
-        .toArray();
+        // Load attendance records for this batch only
+        const records = await db
+          .collection("attendance")
+          .find({
+            userId: { $in: batchUids },
+            instituteId,
+          })
+          .toArray();
 
-      const attendanceByUser = new Map();
-      for (const record of attendanceRecords) {
-        if (!attendanceByUser.has(record.userId)) {
-          attendanceByUser.set(record.userId, []);
-        }
-        attendanceByUser.get(record.userId).push(record);
-      }
-
-      for (const student of instituteStudents) {
-        const studentUid = student.uid || student.firebaseUid;
-        if (!studentUid) continue;
-
-        if (recentWarningUserIds.has(studentUid)) {
-          continue;
-        }
-
-        const studentAttendance = attendanceByUser.get(studentUid) || [];
-        const evaluation = evaluateStudentAttendance(studentAttendance, threshold);
-
-        if (evaluation.isBelowThreshold) {
-          const email = student.email;
-          const name = student.name || student.fullName || "Student";
-
-          notificationsToInsert.push({
-            userId: studentUid,
-            title: "Low Attendance Warning",
-            message: `Your current attendance is ${evaluation.percentage}%, which is below the required ${threshold}%. Please improve your attendance.`,
-            type: "warning",
-            read: false,
-            createdAt: now,
-          });
-
-          warningLogsToInsert.push({
-            userId: studentUid,
-            percentage: evaluation.percentage,
-            threshold,
-            createdAt: now,
-          });
-
-          if (email) {
-            emailsToSend.push({
-              to_email: email,
-              to_name: name,
-              attendance_percentage: evaluation.percentage,
-              threshold,
-              threshold,
-            });
+        const attendanceByUser = new Map(batchUids.map((uid) => [uid, []]));
+        for (const record of records) {
+          const userRecords = attendanceByUser.get(record.userId);
+          if (userRecords) {
+            userRecords.push(record);
           }
+        }
 
-          totalWarnings++;
+        for (const student of batch) {
+          const uid = student.uid || student.firebaseUid;
+          if (!uid || recentWarningUserIds.has(uid)) continue;
+
+          const studentAttendance = attendanceByUser.get(uid) || [];
+          const evaluation = evaluateStudentAttendance(
+            studentAttendance,
+            threshold
+          );
+
+          if (evaluation.isBelowThreshold) {
+            const email = student.email;
+            const name = student.name || student.fullName || "Student";
+
+            notificationsToInsert.push({
+              userId: uid,
+              title: "Low Attendance Warning",
+              message: `Your current attendance is ${evaluation.percentage}%, which is below the required ${threshold}%. Please improve your attendance.`,
+              type: "warning",
+              read: false,
+              createdAt: now,
+            });
+
+            warningLogsToInsert.push({
+              userId: uid,
+              percentage: evaluation.percentage,
+              threshold,
+              createdAt: now,
+            });
+
+            if (email) {
+              emailsToSend.push({
+                to_email: email,
+                to_name: name,
+                attendance_percentage: evaluation.percentage,
+                threshold,
+              });
+            }
+
+            totalWarnings++;
+          }
         }
 
         if (notificationsToInsert.length >= FLUSH_THRESHOLD) {
@@ -294,9 +263,39 @@ export async function GET(request) {
     if (notificationsToInsert.length > 0) {
       await db.collection("notifications").insertMany(notificationsToInsert);
       await db.collection("warning_logs").insertMany(warningLogsToInsert);
+      for (const notif of notificationsToInsert) {
+        publishEvent("notifications", "warning", {
+          _id: notif._id?.toString?.() || notif._id,
+          recipientId: notif.userId,
+          title: notif.title,
+          message: notif.message,
+          type: notif.type,
+          read: false,
+          createdAt:
+            notif.createdAt?.toISOString?.() || new Date().toISOString(),
+        }).catch(() => {});
+      }
     }
 
-    await sendWarningEmails(emailsToSend);
+    if (emailsToSend.length > 0) {
+      try {
+        const jobId = await enqueue(JOB_TYPES.SEND_BULK_EMAILS, {
+          emails: emailsToSend,
+        });
+        logger.info("[attendance-warnings] Queued bulk email job", {
+          jobId,
+          emailCount: emailsToSend.length,
+        });
+      } catch (queueErr) {
+        logger.error("[attendance-warnings] Failed to queue bulk email job", {
+          error: queueErr.message,
+        });
+      }
+    }
+
+    emitWebhookEvent("warning.issued", {
+      totalWarnings,
+    });
 
     return NextResponse.json({
       success: true,

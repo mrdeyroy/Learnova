@@ -1,11 +1,10 @@
 "use client";
-
+//removed unused imports
 import { useState, useRef, useEffect } from "react";
-import { ArrowLeft, Shield, Upload, Check } from "lucide-react";
+import { ArrowLeft, Upload, Check } from "lucide-react";
 import { useAuthContext } from "@/contexts/AuthContext";
 import { motion, AnimatePresence } from "framer-motion";
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 
 export default function ComplaintForm({ onClose, onSubmitComplaint }) {
   const { user } = useAuthContext();
@@ -21,6 +20,13 @@ export default function ComplaintForm({ onClose, onSubmitComplaint }) {
     priority: "Medium",
     description: "",
   });
+  
+  const MAX_LENGTH = 100;
+  const getCounterColor = (length) => {
+    if (length >= MAX_LENGTH) return "text-red-500 font-semibold";     // error-red
+    if (length >= MAX_LENGTH - 15) return "text-amber-500 font-medium"; // warning-amber
+    return "text-neutral-400";                                         // default subtle
+  };
 
   const [isAnonymous, setIsAnonymous] = useState(false);
   const [attachment, setAttachment] = useState(null);
@@ -263,36 +269,6 @@ export default function ComplaintForm({ onClose, onSubmitComplaint }) {
                 </p>
               </div>
             </div>
-
-            <div className="flex items-center justify-between p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/20 dark:bg-slate-900/10">
-              <div>
-                <span className="text-xs font-bold block text-slate-700 dark:text-slate-300">
-                  Submit Anonymously
-                </span>
-                <span className="text-[11px] text-muted-foreground">
-                  Hide your name and student ID from the admin review panel.
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsAnonymous(!isAnonymous)}
-                className={`w-10 h-5.5 rounded-full p-0.5 flex items-center transition-colors cursor-pointer ${isAnonymous ? "bg-indigo-500" : "bg-slate-200 dark:bg-slate-800"}`}
-              >
-                <motion.div
-                  layout
-                  animate={{ x: isAnonymous ? 18 : 0 }}
-                  transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                  className="bg-white dark:bg-slate-900 w-4 h-4 rounded-full shadow-sm"
-                />
-              </button>
-            </div>
-
-            <Button
-              type="submit"
-              className="w-full py-4 rounded-2xl bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900 text-sm font-semibold shadow-md cursor-pointer"
-            >
-              Submit Complaint
-            </Button>
           </form>
         </div>
       </Card>

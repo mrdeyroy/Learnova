@@ -3,10 +3,15 @@ import { withErrorHandler } from "@/lib/error-handler";
 import { jsonSuccess } from "@/lib/api-response";
 import { AppError, ValidationError } from "@/lib/errors";
 import { requireAuth } from "@/lib/rbac";
-import { checkRateLimit } from "@/lib/rateLimit";
+import {
+  checkRateLimit,
+  extractClientIp,
+  RATE_LIMIT_IP_FALLBACK,
+} from "@/lib/rateLimit";
 import {
   extractImageFileFromFormData,
   updateUserImageInDb,
+  allowedImageHosts,
 } from "@/lib/images/imagesService";
 import {
   processAndUploadFile,
@@ -19,7 +24,7 @@ const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
 
 export const POST = withErrorHandler(async (request) => {
   const decodedToken = await requireAuth(request);
-  const ip = request.headers.get("x-forwarded-for") || "127.0.0.1";
+  const ip = extractClientIp(request) || RATE_LIMIT_IP_FALLBACK;
 
   const rateLimitResult = await checkRateLimit(
     `avatar_upload_${ip}_${decodedToken.uid}`
@@ -46,11 +51,35 @@ export const POST = withErrorHandler(async (request) => {
   );
 
   try {
-    await updateUserImageInDb({
+    const { previousImageUrl } = await updateUserImageInDb({
       firebaseUid: decodedToken.uid,
       imageUrl: url,
       faceDescriptor: null,
     });
+
+    if (
+      previousImageUrl &&
+      previousImageUrl !== url
+    ) {
+      try {
+        const hostname = new URL(previousImageUrl).hostname;
+
+        const isBlobHost = allowedImageHosts.some(
+          (host) =>
+            hostname === host ||
+            hostname.endsWith(`.${host}`)
+        );
+
+        if (
+          isBlobHost &&
+          hostname.includes("blob.vercel-storage.com")
+        ) {
+          await activeStorage.delete(previousImageUrl);
+        }
+      } catch {
+        // Ignore malformed URLs or cleanup failures
+      }
+    }
   } catch (error) {
     await activeStorage.delete(url).catch(() => {});
     throw error;

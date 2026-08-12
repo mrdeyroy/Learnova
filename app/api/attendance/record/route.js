@@ -2,68 +2,110 @@ import { jsonError, jsonSuccess } from "@/lib/api-response";
 import { withErrorHandler } from "@/lib/error-handler";
 import { requireAuth } from "@/lib/rbac";
 import { getLocalDateKey } from "@/lib/dateUtils";
-import { checkRateLimit } from "@/lib/rateLimit";
+import {
+  checkRateLimit,
+  extractClientIp,
+  RATE_LIMIT_IP_FALLBACK,
+} from "@/lib/rateLimit";
 import { AppError } from "@/lib/errors";
 import { recordAttendanceSchema, withValidation } from "@/lib/validations";
 import { AttendanceService } from "@/lib/services/attendanceService";
+import { emitWebhookEvent } from "@/lib/webhook/dispatcher";
 
 export const POST = withErrorHandler(
-  withValidation(recordAttendanceSchema, async (request, validatedData, context) => {
-    const token = await requireAuth(request);
+  withValidation(
+    recordAttendanceSchema,
+    async (request, validatedData, context) => {
+      const token = await requireAuth(request);
 
-    const ip = request.headers.get("x-forwarded-for") || "127.0.0.1";
-    const rateLimitResult = await checkRateLimit(
-      `attendance_record_${ip}_${token.uid}`
-    );
-    if (!rateLimitResult.allowed) {
-      throw new AppError("Too many attempts. Please try again later.", 429);
-    }
-
-    const { userId, studentName, email, confidenceScore, date } = validatedData;
-    const normalizedDate = date || getLocalDateKey();
-
-    // 2. Ensure they are only submitting attendance for their own UID, OR they are a teacher/admin!
-    const isTeacherOrAdmin =
-      token.role === "teacher" || token.role === "admin";
-    if (token.uid !== userId && !isTeacherOrAdmin) {
-      return jsonError(
-        "Forbidden: Cannot submit attendance for another user",
-        403
+      const ip = extractClientIp(request) || RATE_LIMIT_IP_FALLBACK;
+      const rateLimitResult = await checkRateLimit(
+        `attendance_record_${ip}_${token.uid}`
       );
-    }
+      if (!rateLimitResult.allowed) {
+        throw new AppError("Too many attempts. Please try again later.", 429);
+      }
 
-    // 3. Ensure they actually matched the face threshold (60 is the minimum configured in the frontend)
-    const parsedConfidence = Number(confidenceScore);
-    if (parsedConfidence < 60) {
-      return jsonError("Bad Request: Invalid or spoofed confidence score", 400);
-    }
+      const { userId, studentName, email, confidenceScore, date } =
+        validatedData;
 
-    // Normalize confidence score to 0-1 range for consistency across the DB and dashboards
-    const normalizedConfidence = parsedConfidence / 100;
+      // 2. Ensure they are only submitting attendance for their own UID, OR they are a teacher/admin!
+      const isTeacherOrAdmin =
+        token.role === "teacher" || token.role === "admin";
+      if (token.uid !== userId && !isTeacherOrAdmin) {
+        return jsonError(
+          "Forbidden: Cannot submit attendance for another user",
+          403
+        );
+      }
 
-    // 4. Record attendance using the domain service
-    const sagaResult = await AttendanceService.recordAttendance(
-      {
-        userId,
-        studentName,
-        email,
-        confidenceScore,
-        normalizedDate,
-      },
-      token
-    );
+      // 2b. Only teachers/admins may back-date attendance. Students always
+      // record for the server's current day, otherwise a student could POST
+      // any past `date` and silently backfill an attendance record for a day
+      // they never attended (issue #4061). Also reject future dates outright.
+      const serverDate = getLocalDateKey();
+      let normalizedDate = serverDate;
+      if (date) {
+        if (!isTeacherOrAdmin) {
+          if (date !== serverDate) {
+            return jsonError(
+              "Forbidden: Only teachers/admins may record attendance for a past date",
+              403
+            );
+          }
+          normalizedDate = serverDate;
+        } else {
+          if (date > serverDate) {
+            return jsonError(
+              "Bad Request: Cannot record attendance for a future date",
+              400
+            );
+          }
+          normalizedDate = date;
+        }
+      }
 
-    if (sagaResult.context._alreadyRecorded) {
-      return jsonSuccess({ alreadyRecorded: true }, 200);
-    }
+      // 3. Ensure they actually matched the face threshold (60 is the minimum configured in the frontend)
+      const parsedConfidence = Number(confidenceScore);
+      if (!Number.isFinite(parsedConfidence) || parsedConfidence < 60) {
+        return jsonError(
+          "Bad Request: Invalid or spoofed confidence score",
+          400
+        );
+      }
 
-    if (!sagaResult.success) {
-      console.error(
-        `[attendance] Saga failed at step "${sagaResult.failedStep}" for user ${userId}: ${sagaResult.error}`
+      // Clamp confidence score to 0-100 bounds before normalization
+      const clampedConfidence = Math.min(100, Math.max(0, parsedConfidence));
+
+      // Normalize confidence score to 0-1 range for consistency across the DB and dashboards
+      const normalizedConfidence = clampedConfidence / 100;
+
+      // 4. Record attendance using the domain service
+      const sagaResult = await AttendanceService.recordAttendance(
+        {
+          userId,
+          studentName,
+          email,
+          normalizedConfidenceScore: normalizedConfidence,
+          normalizedDate,
+        },
+        token
       );
-      return jsonError("Attendance recording failed", 502);
-    }
 
-    return jsonSuccess({ alreadyRecorded: false }, 201);
-  })
+      const alreadyRecorded = Boolean(sagaResult.context?._alreadyRecorded);
+
+      if (sagaResult.success && !alreadyRecorded) {
+        emitWebhookEvent("attendance.recorded", {
+          studentId: userId,
+          studentName,
+          email,
+          confidence: normalizedConfidence,
+          date: normalizedDate,
+          recordedBy: token.uid,
+        });
+      }
+
+      return jsonSuccess({ alreadyRecorded }, alreadyRecorded ? 200 : 201);
+    }
+  )
 );

@@ -1,0 +1,118 @@
+import { jsonError, jsonSuccess } from "@/lib/api-response";
+import { withErrorHandler, parseJSON } from "@/lib/error-handler";
+import { requireAuth } from "@/lib/rbac";
+import { initFirebaseAdmin, getUserProfile } from "@/lib/firebase-admin";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { AppError } from "@/lib/errors";
+import { checkRateLimit } from "@/lib/rateLimit";
+import { connectDb } from "@/lib/mongodb";
+import { z } from "zod";
+
+const overrideSchema = z.object({
+  studentId: z.string().min(1),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  status: z.enum(["present", "absent", "late"]),
+});
+
+export const POST = withErrorHandler(async (request) => {
+  const token = await requireAuth(request);
+
+  // Allow teachers, admins, and institute hosts to override attendance
+  if (token.role !== "teacher" && token.role !== "admin" && token.role !== "institute") {
+    throw new AppError("Forbidden: Only teachers, admins, or institute hosts can override attendance", 403);
+  }
+
+  const ip = request.headers.get("x-forwarded-for") || "127.0.0.1";
+  const rl = await checkRateLimit(`attendance_override_${ip}_${token.uid}`);
+  if (!rl.allowed) throw new AppError("Too many requests", 429);
+
+  const body = await parseJSON(request, 1024);
+  const { studentId, date, status } = overrideSchema.parse(body);
+
+  initFirebaseAdmin();
+
+  // Fetch student profile details from Firestore
+  const userProfile = await getUserProfile(studentId);
+  if (!userProfile) {
+    throw new AppError("Student not found", 404);
+  }
+
+  // Enforce Tenant Isolation for non-admin users
+  if (token.role !== "admin") {
+    const requesterProfile = await getUserProfile(token.uid);
+    const requesterInstituteId =
+      requesterProfile?.instituteId || (token.role === "institute" ? token.uid : null);
+    const studentInstituteId = userProfile?.instituteId || null;
+
+    if (
+      !requesterInstituteId ||
+      !studentInstituteId ||
+      requesterInstituteId !== studentInstituteId
+    ) {
+      throw new AppError(
+        "Forbidden: You are not authorized to override attendance for students outside your institute",
+        403
+      );
+    }
+  }
+
+  const db = getFirestore();
+  const docRef = db.collection("attendance_records").doc(`${studentId}_${date}`);
+
+  // Use runTransaction so concurrent teacher overrides for DIFFERENT students
+  // in the same class are safely merged (field-level, not full-doc overwrites)
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(docRef);
+    if (snap.exists) {
+      // Field-level update: only touch status + override metadata
+      // This is the key fix — other concurrent writes to different fields are preserved
+      tx.update(docRef, {
+        status,
+        overriddenBy: token.uid,
+        overriddenAt: FieldValue.serverTimestamp(),
+      });
+    } else {
+      // Create the record if it doesn't exist (e.g. absent student)
+      tx.set(docRef, {
+        userId: studentId,
+        date,
+        status,
+        overriddenBy: token.uid,
+        overriddenAt: FieldValue.serverTimestamp(),
+        timestamp: FieldValue.serverTimestamp(),
+        offlineSynced: false,
+      });
+    }
+  });
+
+  // Resolve student details for MongoDB sync
+  const resolvedName = userProfile?.fullName || userProfile?.name || "Unknown User";
+  const resolvedEmail = userProfile?.email || "unknown@learnova.edu";
+  const instituteId = userProfile?.instituteId || null;
+
+  // Sync the override to MongoDB
+  const mongoDB = await connectDb();
+  await mongoDB.collection("attendance").updateOne(
+    { userId: studentId, date },
+    {
+      $set: {
+        status,
+        overriddenBy: token.uid,
+        overriddenAt: new Date(),
+        timestamp: new Date(),
+        offlineSynced: false,
+      },
+      $setOnInsert: {
+        userId: studentId,
+        date,
+        studentName: resolvedName,
+        email: resolvedEmail,
+        instituteId,
+      },
+    },
+    { upsert: true }
+  );
+
+  return jsonSuccess({ updated: true });
+});
+

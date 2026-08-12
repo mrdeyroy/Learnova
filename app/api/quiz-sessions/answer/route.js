@@ -1,16 +1,17 @@
 import { connectDb } from "@/lib/mongodb";
 import { requireAuth } from "@/lib/rbac";
 import { withErrorHandler } from "@/lib/error-handler";
+import { ObjectId } from "mongodb";
 
 export const POST = withErrorHandler(async (req) => {
   const payload = await requireAuth(req);
   const { sessionId, questionId, answer, timestamp } = await req.json();
 
   if (!sessionId || !questionId || answer === undefined) {
-    return new Response(
-      JSON.stringify({ error: "Missing required fields" }),
-      { status: 400, headers: { "Content-Type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ error: "Missing required fields" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   const db = await connectDb();
@@ -25,7 +26,8 @@ export const POST = withErrorHandler(async (req) => {
     });
   }
 
-  if (session.userId !== payload.uid) {
+  const sessionUserId = session.userId || session.firebaseUid;
+  if (sessionUserId !== payload.uid) {
     return new Response(JSON.stringify({ error: "Forbidden" }), {
       status: 403,
       headers: { "Content-Type": "application/json" },
@@ -46,9 +48,7 @@ export const POST = withErrorHandler(async (req) => {
     });
   }
 
-  const quiz = await db
-    .collection("quizzes")
-    .findOne({ _id: session.quizId });
+  const quiz = await db.collection("quizzes").findOne({ _id: new ObjectId(session.quizId) });
   const questionExists = quiz.questions.some((q) => q._id === questionId);
 
   if (!questionExists) {
@@ -58,8 +58,8 @@ export const POST = withErrorHandler(async (req) => {
     );
   }
 
-  await db.collection("quiz_sessions").updateOne(
-    { _id: sessionId },
+  const updateResult = await db.collection("quiz_sessions").updateOne(
+    { _id: sessionId, completed: { $ne: true } },
     {
       $set: {
         [`answers.${questionId}`]: answer,
@@ -67,6 +67,13 @@ export const POST = withErrorHandler(async (req) => {
       },
     }
   );
+
+  if (updateResult.matchedCount === 0) {
+    return new Response(JSON.stringify({ error: "Quiz already submitted" }), {
+      status: 403,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 
   return new Response(
     JSON.stringify({

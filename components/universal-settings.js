@@ -37,6 +37,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { Navbar } from "./Navbar";
 import { useTheme } from "next-themes";
 import { motion } from "framer-motion";
+import { safeLocalStorageRemove } from "@/lib/storage";
 import i18n from "@/lib/i18n";
 import { useTranslation } from "react-i18next";
 import { apiFetch } from "@/lib/apiClient";
@@ -88,6 +89,19 @@ export default function UniversalSettings() {
   const [pushPermission, setPushPermission] = useState("default");
   const [avatarFile, setAvatarFile] = useState(null);
   const [avatarPreview, setAvatarPreview] = useState(null);
+  const [instituteSettings, setInstituteSettings] = useState({
+    enableAttendanceAutomation: false,
+    lowAttendanceThreshold: 75,
+  });
+
+  useEffect(() => {
+    const savedLanguage = localStorage.getItem("learnova-language");
+
+    if (savedLanguage) {
+      updateSetting("appearance", "language", savedLanguage);
+      i18n.changeLanguage(savedLanguage);
+    }
+  }, []);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -147,7 +161,6 @@ export default function UniversalSettings() {
                     await updateDoc(doc(db, "users", user.uid), {
                       fcmToken: token,
                     });
-                    console.log("FCM Token saved successfully");
                   }
                 } catch (tokenErr) {
                   console.error("Error getting FCM token:", tokenErr);
@@ -251,6 +264,7 @@ export default function UniversalSettings() {
           achievementAlerts: true,
           weeklyReports: false,
           marketingEmails: false,
+          bulkAnnouncements: true,
           attendanceAlerts: true,
           gradeUpdates: true,
         },
@@ -273,6 +287,7 @@ export default function UniversalSettings() {
           achievementAlerts: false,
           weeklyReports: true,
           marketingEmails: false,
+          bulkAnnouncements: true,
           studentSubmissions: true,
           parentMessages: true,
         },
@@ -295,6 +310,7 @@ export default function UniversalSettings() {
           achievementAlerts: false,
           weeklyReports: true,
           marketingEmails: false,
+          bulkAnnouncements: true,
           systemAlerts: true,
           securityAlerts: true,
         },
@@ -317,6 +333,7 @@ export default function UniversalSettings() {
           achievementAlerts: false,
           weeklyReports: true,
           marketingEmails: true,
+          bulkAnnouncements: true,
           enrollmentAlerts: true,
           performanceReports: true,
         },
@@ -339,6 +356,7 @@ export default function UniversalSettings() {
           achievementAlerts: true,
           weeklyReports: true,
           marketingEmails: false,
+          bulkAnnouncements: true,
           childProgress: true,
           schoolUpdates: true,
         },
@@ -394,6 +412,31 @@ export default function UniversalSettings() {
               avatar: getUserPhoto() || prev.profile.avatar,
             },
           }));
+
+          // Load institute-level attendance automation settings for admin/institute roles
+          const role = user?.role || "student";
+          if (["admin", "institute"].includes(role)) {
+            try {
+              const res = await apiFetch("/api/settings", {
+                method: "GET",
+                credentials: "include",
+              });
+              if (res.ok) {
+                const data = await res.json();
+                if (data?.institute) {
+                  setInstituteSettings((prev) => ({
+                    ...prev,
+                    enableAttendanceAutomation:
+                      data.institute.enableAttendanceAutomation ?? prev.enableAttendanceAutomation,
+                    lowAttendanceThreshold:
+                      data.institute.lowAttendanceThreshold ?? prev.lowAttendanceThreshold,
+                  }));
+                }
+              }
+            } catch (instituteErr) {
+              console.warn("Could not load institute settings:", instituteErr);
+            }
+          }
         }
       } catch (err) {
         setError("Failed to load settings. Please try again.");
@@ -421,46 +464,77 @@ export default function UniversalSettings() {
     setIsLoading(true);
     setError(null);
     try {
-      // Upload avatar separately if one was selected
       let avatarUrl = settings.profile.avatar;
       if (avatarFile) {
-        const formData = new FormData();
-        formData.append("file", avatarFile);
+        try {
+          const formData = new FormData();
+          formData.append("file", avatarFile);
 
-        const uploadResponse = await apiFetch("/api/upload/avatar", {
-          method: "POST",
-          body: formData,
-          credentials: "include", // Include cookies for authentication
-        });
+          const uploadResponse = await apiFetch("/api/upload/avatar", {
+            method: "POST",
+            body: formData,
+            credentials: "include", // Include cookies for authentication
+          });
 
-        if (!uploadResponse.ok) {
-          const errorData = await uploadResponse.json().catch(() => ({}));
-          const errorMsg =
-            errorData.error || errorData.message || "Failed to upload avatar";
-          throw new Error(`Avatar upload failed: ${errorMsg}`);
+          const uploadResponseText = await uploadResponse.text().catch(() => "");
+          let uploadData = null;
+
+          if (uploadResponseText) {
+            try {
+              uploadData = JSON.parse(uploadResponseText);
+            } catch (parseError) {
+              console.error("Error parsing avatar upload response:", parseError);
+              throw new Error("Avatar upload returned invalid data.");
+            }
+          }
+
+          if (!uploadResponse.ok) {
+            const errorMsg =
+              uploadData?.error ||
+              uploadData?.message ||
+              uploadResponseText ||
+              "Failed to upload avatar";
+            throw new Error(`Avatar upload failed: ${errorMsg}`);
+          }
+
+          if (!uploadData || !uploadData.url) {
+            throw new Error("Avatar upload completed without a usable image URL.");
+          }
+
+          avatarUrl = uploadData.url;
+          setAvatarFile(null);
+          setAvatarPreview(null);
+        } catch (avatarError) {
+          console.error("Error uploading avatar:", avatarError);
+          toast.error(
+            avatarError?.message || "Avatar upload failed, saving other settings only."
+          );
         }
-
-        const uploadData = await uploadResponse.json();
-        if (!uploadData.url) {
-          throw new Error("No URL returned from avatar upload");
-        }
-        avatarUrl = uploadData.url;
-        setAvatarFile(null);
-        setAvatarPreview(null);
       }
 
       // Save other settings
+      const role = user?.role || "student";
+      const body = {
+        ...settings,
+        profile: {
+          ...settings.profile,
+          avatar: avatarUrl,
+        },
+        userId: user?.uid,
+      };
+
+      // Include institute-level attendance automation settings for privileged roles
+      if (["admin", "institute"].includes(role)) {
+        body.institute = {
+          enableAttendanceAutomation: instituteSettings.enableAttendanceAutomation,
+          lowAttendanceThreshold: Number(instituteSettings.lowAttendanceThreshold),
+        };
+      }
+
       const response = await apiFetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...settings,
-          profile: {
-            ...settings.profile,
-            avatar: avatarUrl,
-          },
-          userId: user?.uid,
-        }),
+        body: JSON.stringify(body),
       });
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -512,11 +586,9 @@ export default function UniversalSettings() {
   const handleResetToDefaults = async () => {
     try {
       // 1. Clear settings-related keys in localStorage safely
-      if (typeof window !== "undefined" && window.localStorage) {
-        window.localStorage.removeItem("theme");
-        window.localStorage.removeItem("settings");
-        window.localStorage.removeItem("learnova_settings");
-      }
+      safeLocalStorageRemove("theme");
+      safeLocalStorageRemove("settings");
+      safeLocalStorageRemove("learnova_settings");
 
       // 2. Revert theme in next-themes provider to default 'dark'
       setTheme("dark");
@@ -664,7 +736,7 @@ export default function UniversalSettings() {
           <div>
             <h1 className="text-3xl font-bold text-white mb-2 flex items-center">
               <Settings className="h-8 w-8 mr-3 text-blue-400" />
-              {t("settings")}
+              {t("settings.description")}
               <Sparkles className="ml-3 h-6 w-6 text-yellow-400 animate-pulse" />
             </h1>
             <p className="text-white/60">
@@ -977,6 +1049,67 @@ export default function UniversalSettings() {
                     )}
                   </div>
                 </SettingCard>
+
+                {/* Attendance Automation — institute/admin only */}
+                {["admin", "institute"].includes(user?.role) && (
+                  <SettingCard
+                    title="Attendance Automation"
+                    description="Automatically notify students by email when their attendance drops below the configured threshold. Requires EmailJS environment variables to be configured."
+                  >
+                    <div className="space-y-5">
+                      <ToggleSwitch
+                        enabled={instituteSettings.enableAttendanceAutomation}
+                        onChange={(value) => {
+                          setInstituteSettings((prev) => ({
+                            ...prev,
+                            enableAttendanceAutomation: value,
+                          }));
+                          setHasChanges(true);
+                        }}
+                        label="Enable Attendance Automation"
+                        description="Run a daily cron job to detect students with low attendance and send email warnings."
+                      />
+
+                      <div
+                        className={`transition-opacity duration-300 ${
+                          instituteSettings.enableAttendanceAutomation
+                            ? "opacity-100"
+                            : "opacity-40 pointer-events-none"
+                        }`}
+                      >
+                        <label className="block text-white/80 text-sm font-medium mb-2">
+                          Low Attendance Threshold:{" "}
+                          <span className="text-blue-400 font-bold">
+                            {instituteSettings.lowAttendanceThreshold}%
+                          </span>
+                        </label>
+                        <p className="text-white/50 text-xs mb-3">
+                          Students whose overall attendance falls below this percentage will receive an automated email warning.
+                        </p>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          step="1"
+                          value={instituteSettings.lowAttendanceThreshold}
+                          onChange={(e) => {
+                            setInstituteSettings((prev) => ({
+                              ...prev,
+                              lowAttendanceThreshold: Number(e.target.value),
+                            }));
+                            setHasChanges(true);
+                          }}
+                          className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                        />
+                        <div className="flex justify-between text-white/40 text-xs mt-1">
+                          <span>0%</span>
+                          <span>50%</span>
+                          <span>100%</span>
+                        </div>
+                      </div>
+                    </div>
+                  </SettingCard>
+                )}
               </div>
             )}
 
@@ -1306,12 +1439,12 @@ export default function UniversalSettings() {
                       <select
                         value={settings.appearance.language}
                         onChange={(e) => {
-                          updateSetting(
-                            "appearance",
-                            "language",
-                            e.target.value
-                          );
-                          i18n.changeLanguage(e.target.value);
+                          const lang = e.target.value;
+
+                          updateSetting("appearance", "language", lang);
+                          i18n.changeLanguage(lang);
+
+                          localStorage.setItem("learnova-language", lang);
                         }}
                         className="w-full bg-white/10 border border-white/20 rounded-lg px-4 py-2 text-white focus:border-blue-400 focus:outline-none"
                       >
@@ -1329,6 +1462,17 @@ export default function UniversalSettings() {
                         </option>
                         <option value="zh" className="bg-slate-950 text-white">
                           中文
+                        </option>
+                        <option value="hi" className="bg-slate-950 text-white">
+                          हिन्दी
+                        </option>
+
+                        <option value="ja" className="bg-slate-950 text-white">
+                          日本語
+                        </option>
+
+                        <option value="ar" className="bg-slate-950 text-white">
+                          العربية
                         </option>
                       </select>
                     </div>
@@ -1499,7 +1643,10 @@ export default function UniversalSettings() {
               >
                 <div className="space-y-4">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <button className="flex items-center space-x-3 p-4 bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-all duration-200 text-left" aria-label="Action button">
+                    <button
+                      className="flex items-center space-x-3 p-4 bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-all duration-200 text-left"
+                      aria-label="Action button"
+                    >
                       <FileText className="h-6 w-6 text-blue-400" />
                       <div>
                         <p className="text-white font-medium">Documentation</p>
@@ -1509,7 +1656,10 @@ export default function UniversalSettings() {
                       </div>
                     </button>
 
-                    <button className="flex items-center space-x-3 p-4 bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-all duration-200 text-left" aria-label="Action button">
+                    <button
+                      className="flex items-center space-x-3 p-4 bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-all duration-200 text-left"
+                      aria-label="Action button"
+                    >
                       <Mail className="h-6 w-6 text-green-400" />
                       <div>
                         <p className="text-white font-medium">
@@ -1521,7 +1671,10 @@ export default function UniversalSettings() {
                       </div>
                     </button>
 
-                    <button className="flex items-center space-x-3 p-4 bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-all duration-200 text-left" aria-label="Action button">
+                    <button
+                      className="flex items-center space-x-3 p-4 bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-all duration-200 text-left"
+                      aria-label="Action button"
+                    >
                       <HelpCircle className="h-6 w-6 text-purple-400" />
                       <div>
                         <p className="text-white font-medium">FAQ</p>
@@ -1531,7 +1684,10 @@ export default function UniversalSettings() {
                       </div>
                     </button>
 
-                    <button className="flex items-center space-x-3 p-4 bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-all duration-200 text-left" aria-label="Action button">
+                    <button
+                      className="flex items-center space-x-3 p-4 bg-white/5 rounded-lg border border-white/10 hover:bg-white/10 transition-all duration-200 text-left"
+                      aria-label="Action button"
+                    >
                       <Globe className="h-6 w-6 text-orange-400" />
                       <div>
                         <p className="text-white font-medium">Community</p>

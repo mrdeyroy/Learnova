@@ -1,16 +1,17 @@
 import { connectDb } from "@/lib/mongodb";
 import { requireAuth } from "@/lib/rbac";
 import { withErrorHandler } from "@/lib/error-handler";
+import { ObjectId } from "mongodb";
 
 export const GET = withErrorHandler(async (req, { params }) => {
   const payload = await requireAuth(req);
   const { sessionId } = await params;
 
   if (!sessionId) {
-    return new Response(
-      JSON.stringify({ error: "Session ID is required" }),
-      { status: 400, headers: { "Content-Type": "application/json" } }
-    );
+    return new Response(JSON.stringify({ error: "Session ID is required" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 
   const db = await connectDb();
@@ -25,16 +26,15 @@ export const GET = withErrorHandler(async (req, { params }) => {
     });
   }
 
-  if (session.userId !== payload.uid) {
+  const sessionUserId = session.userId || session.firebaseUid;
+  if (sessionUserId !== payload.uid) {
     return new Response(JSON.stringify({ error: "Forbidden" }), {
       status: 403,
       headers: { "Content-Type": "application/json" },
     });
   }
 
-  const quiz = await db
-    .collection("quizzes")
-    .findOne({ _id: session.quizId });
+  const quiz = await db.collection("quizzes").findOne({ _id: new ObjectId(session.quizId) });
 
   return new Response(
     JSON.stringify({
